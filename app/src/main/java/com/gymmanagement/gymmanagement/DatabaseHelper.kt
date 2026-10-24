@@ -1,6 +1,7 @@
 
 package com.gymmanagement.gymmanagement
 
+import android.R
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
@@ -1373,149 +1374,29 @@ class DatabaseHelper(context: Context) :
         }
     }
 
-    fun ensureTrialForExpiredMembers() {
+    fun ensureExpiredMembers() {
 
         val db = writableDatabase
-        val today = today()
+        val todayDate = today()
+        db.execSQL(
 
-        val expired = db.rawQuery(
             """
-            SELECT ms.member_id
-            FROM memberships ms
-            WHERE ms.is_trial = 0
-              AND date(ms.end_date) < date(?)
-              AND ms.id = (
+                UPDATE memberships
+                SET status = 'EXPIRED'
+                WHERE is_trial = 0
+                  AND frozen = 0
+                  AND date(end_date) < date(?)
+                  AND id IN(
                   SELECT MAX(ms2.id)
                   FROM memberships ms2
-                  WHERE ms2.member_id = ms.member_id
-              )
-            """,
-            arrayOf(today)
+                  GROUP BY ms2.member_id
+                  )
+                  AND UPPER(status) != 'EXPIRED'
+            """.trimIndent(),
+            arrayOf(todayDate)
         )
-
-        expired.use {
-
-            while (it.moveToNext()) {
-
-                val memberId = it.getLong(0)
-
-                val trialPlan =
-                    db.rawQuery(
-                        """
-                        SELECT id
-                        FROM membership_plans
-                        WHERE is_trial=1
-                        LIMIT 1
-                        """,
-                        null
-                    )
-
-                trialPlan.use { tp ->
-
-                    if (tp.moveToFirst()) {
-
-                        val trialPlanId =
-                            tp.getLong(0)
-
-                        val existingTrial =
-                            db.rawQuery(
-                                """
-                                SELECT id
-                                FROM memberships
-                                WHERE member_id=?
-                                  AND is_trial=1
-                                  AND status='Trial'
-                                  AND date(end_date) >= date(?)
-                                ORDER BY id DESC
-                                LIMIT 1
-                                """,
-                                arrayOf(
-                                    memberId.toString(),
-                                    today
-                                )
-                            )
-
-                        existingTrial.use { et ->
-
-                            if (!et.moveToFirst()) {
-
-                                val membership =
-                                    ContentValues().apply {
-
-                                        put(
-                                            "member_id",
-                                            memberId
-                                        )
-                                        put(
-                                            "plan_id",
-                                            trialPlanId
-                                        )
-                                        put(
-                                            "start_date",
-                                            today
-                                        )
-                                        put(
-                                            "end_date",
-                                            "9999-12-31"
-                                        )
-                                        put(
-                                            "plan_amount",
-                                            0.0
-                                        )
-                                        put(
-                                            "discount_type",
-                                            "NONE"
-                                        )
-                                        put(
-                                            "discount_value",
-                                            0.0
-                                        )
-                                        put(
-                                            "discount_amount",
-                                            0.0
-                                        )
-                                        put(
-                                            "total_amount",
-                                            0.0
-                                        )
-                                        put(
-                                            "paid_amount",
-                                            0.0
-                                        )
-                                        put(
-                                            "balance_amount",
-                                            0.0
-                                        )
-                                        put(
-                                            "status",
-                                            "Trial"
-                                        )
-                                        put(
-                                            "frozen",
-                                            0
-                                        )
-                                        put(
-                                            "is_trial",
-                                            1
-                                        )
-                                        put(
-                                            "created_at",
-                                            now()
-                                        )
-                                    }
-
-                                db.insertOrThrow(
-                                    "memberships",
-                                    null,
-                                    membership
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
+
 
     fun checkIn(
         memberCode: String

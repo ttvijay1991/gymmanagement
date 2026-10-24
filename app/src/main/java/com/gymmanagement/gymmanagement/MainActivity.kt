@@ -166,6 +166,7 @@ class MainActivity : ComponentActivity() {
         ensureMemberBodyColumns()
 
         DatabaseHelper(this).createDefaultAdmin()
+        DatabaseHelper(this).ensureExpiredMembers()
         AutoBackupManager.ensureScheduled(this)
         scheduleAutoClockOut(this)
         if (CheckInModeConfig.isEnabled()) {
@@ -6209,7 +6210,7 @@ class MainActivity : ComponentActivity() {
                     hasActiveRegularPlan = hasActiveRegularPlan,
                     hasPendingBalance = hasPendingBalance,
                     message = message,
-                    onSectionSelected = { selectSection(it) },
+                        onSectionSelected = { selectSection(it) },
                     onAccessChange = { newValue ->
                         val values = android.content.ContentValues().apply {
                             put("active", if (newValue) 1 else 0)
@@ -7989,6 +7990,16 @@ class MainActivity : ComponentActivity() {
                     onSelected = { onSectionSelected("PERSONAL") }
                 )
                 Spacer(Modifier.height(10.dp))
+
+                ProfileSectionCard(
+                    key = "HISTORY",
+                    title = "Membership History",
+                    subtitle = "Past plans & gym visits",
+                    selected = selectedSection == "HISTORY",
+                    onSelected = { onSectionSelected("HISTORY") }
+                )
+                Spacer(Modifier.height(10.dp))
+
                 ProfileSectionCard(
                     key = "DOCUMENTS",
                     title = "Documents",
@@ -7996,6 +8007,8 @@ class MainActivity : ComponentActivity() {
                     selected = selectedSection == "DOCUMENTS",
                     onSelected = { onSectionSelected("DOCUMENTS") }
                 )
+
+
                 Spacer(Modifier.height(12.dp))
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -8050,13 +8063,15 @@ class MainActivity : ComponentActivity() {
                     label = "member_profile_section"
                 ) { section ->
                     ProfileSelectedContent(
-                        section,
-                        profileBitmap,
-                        name,
-                        memberCode,
-                        planName,
-                        startDate,
-                        endDate,
+                        section = section,
+                        db = db,
+                        memberId = memberId,
+                        profileBitmap = profileBitmap,
+                        name = name,
+                        memberCode = memberCode,
+                        planName = planName,
+                        startDate = startDate,
+                        endDate = endDate,
                         planAmount,
                         discountAmount,
                         totalAmount,
@@ -8103,6 +8118,173 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    fun MemberMembershipHistory(
+        db: DatabaseHelper,
+        memberId: Long
+    ) {
+        val history = remember(memberId) {
+            val rows = mutableListOf<Array<String>>()
+
+            val cursor = db.readableDatabase.rawQuery(
+                """
+            SELECT
+                p.name,
+                ms.start_date,
+                ms.end_date,
+                ms.status,
+                ms.is_trial,
+                (
+                    SELECT COUNT(DISTINCT date(a.check_in))
+                    FROM attendance a
+                    WHERE a.member_id = ms.member_id
+                      AND date(a.check_in) >= date(ms.start_date)
+                      AND date(a.check_in) <= date(ms.end_date)
+                ) AS login_days
+            FROM memberships ms
+            LEFT JOIN membership_plans p ON p.id = ms.plan_id
+            WHERE ms.member_id = ?
+            ORDER BY ms.id DESC
+            """.trimIndent(),
+                arrayOf(memberId.toString())
+            )
+
+            cursor.use {
+                while (it.moveToNext()) {
+                    rows.add(
+                        arrayOf(
+                            it.getString(0) ?: "Membership",
+                            it.getString(1) ?: "-",
+                            it.getString(2) ?: "-",
+                            it.getString(3) ?: "Unknown",
+                            if (it.getInt(4) == 1) "TRIAL" else "REGULAR",
+                            it.getString(5) ?: "0"
+                        )
+                    )
+                }
+            }
+
+            rows
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "MEMBERSHIP HISTORY",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold
+            )
+
+            Text(
+                "Past and current plans with gym visit details",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            if (history.isEmpty()) {
+                Card(Modifier.fillMaxWidth()) {
+                    Text(
+                        "No membership history found for this member.",
+                        modifier = Modifier.padding(20.dp)
+                    )
+                }
+            } else {
+                history.forEachIndexed { index, item ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement =
+                                    Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        item[0],
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        item[4],
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+
+                                Text(
+                                    item[3].uppercase(),
+                                    fontWeight = FontWeight.Bold,
+                                    color = when {
+                                        item[3].equals(
+                                            "Active",
+                                            ignoreCase = true
+                                        ) -> Color(0xFF15803D)
+
+                                        item[3].equals(
+                                            "Expired",
+                                            ignoreCase = true
+                                        ) -> Color(0xFFDC2626)
+
+                                        else -> MaterialTheme.colorScheme
+                                            .onSurfaceVariant
+                                    }
+                                )
+                            }
+
+                            HorizontalDivider()
+
+                            HistoryInfoRow("Start Date", item[1])
+                            HistoryInfoRow("End Date", item[2])
+                            HistoryInfoRow("Gym Login Days", item[5])
+
+                            Text(
+                                if (index == 0) {
+                                    "Latest recorded plan"
+                                } else {
+                                    "Previous plan"
+                                },
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun HistoryInfoRow(
+        label: String,
+        value: String
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                label,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Text(
+                value.ifBlank { "-" },
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+
+    @Composable
     fun CheckInModeScreen(db: DatabaseHelper, onExit: () -> Unit) {
         val settings = db.getGymSettings()
         val gymName = settings["name"].orEmpty().ifBlank { "GYM MANAGEMENT" }
@@ -8136,20 +8318,72 @@ class MainActivity : ComponentActivity() {
                 error = "Enter your Member ID number."
                 return
             }
+
             val code = (prefix + memberNumber).uppercase()
+
             val c = db.readableDatabase.rawQuery(
-                "SELECT id FROM members WHERE upper(member_code)=? AND active=1 LIMIT 1",
+                """
+        SELECT
+            m.id,
+            COALESCE(ms.status, ''),
+            COALESCE(ms.is_trial, 0),
+            COALESCE(ms.end_date, '')
+        FROM members m
+        LEFT JOIN memberships ms
+            ON ms.id = (
+                SELECT MAX(ms2.id)
+                FROM memberships ms2
+                WHERE ms2.member_id = m.id
+            )
+        WHERE UPPER(m.member_code) = ?
+          AND m.active = 1
+        LIMIT 1
+        """.trimIndent(),
                 arrayOf(code)
             )
-            val exists = c.use { it.moveToFirst() }
-            if (!exists) {
+
+            var memberFound = false
+            var isExpired = false
+
+            c.use {
+                if (it.moveToFirst()) {
+                    memberFound = true
+
+                    val status = it.getString(1).orEmpty()
+                        .uppercase()
+
+                    val isTrial = it.getInt(2) == 1
+                    val expiryDate = it.getString(3).orEmpty()
+
+                    val today = java.text.SimpleDateFormat(
+                        "yyyy-MM-dd",
+                        java.util.Locale.US
+                    ).format(java.util.Date())
+
+                    isExpired = !isTrial && (
+                            status == "EXPIRED" ||
+                                    (
+                                            expiryDate.isNotBlank() &&
+                                                    expiryDate < today
+                                            )
+                            )
+                }
+            }
+
+            if (!memberFound) {
                 error = "$code was not found. Please check your Member ID."
                 return
             }
+
             selectedCode = code
             message = ""
             error = ""
-            screen = "MEMBER"
+
+            screen = if (isExpired) {
+                "EXPIRED"
+            } else {
+                "MEMBER"
+            }
         }
 
         fun pressKey(key: String) {
@@ -8179,9 +8413,11 @@ class MainActivity : ComponentActivity() {
         }
 
         if (screen == "REGISTERED") {
-            Box(Modifier
-                .fillMaxSize()
-                .padding(24.dp), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(24.dp), contentAlignment = Alignment.Center
+            ) {
                 Card(
                     Modifier
                         .fillMaxWidth()
@@ -8223,27 +8459,39 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (screen == "MEMBER") {
-            CheckInMemberDetailsScreen(
-                db = db,
-                memberCode = selectedCode,
-                refresh = refresh,
-                onBack = { goHome() },
-                onChanged = { refresh++ },
-                onCheckInComplete = { goHome() }
-            )
-        } else {
-            CheckInTabletHomeScreen(
-                gymName = gymName,
-                prefix = prefix,
-                memberNumber = memberNumber,
-                message = message,
-                error = error,
-                onKey = ::pressKey,
-                onContinue = ::loadMember,
-                onNewMember = { screen = "REGISTER" },
-                onExit = { showExitDialog = true }
-            )
+        when (screen) {
+            "EXPIRED" -> {
+                ExpiredMembershipScreen(
+                    db = db,
+                    memberCode = selectedCode,
+                    onBack = { goHome() }
+                )
+            }
+
+            "MEMBER" -> {
+                CheckInMemberDetailsScreen(
+                    db = db,
+                    memberCode = selectedCode,
+                    refresh = refresh,
+                    onBack = { goHome() },
+                    onChanged = { refresh++ },
+                    onCheckInComplete = { goHome() }
+                )
+            }
+
+            else -> {
+                CheckInTabletHomeScreen(
+                    gymName = gymName,
+                    prefix = prefix,
+                    memberNumber = memberNumber,
+                    message = message,
+                    error = error,
+                    onKey = ::pressKey,
+                    onContinue = ::loadMember,
+                    onNewMember = { screen = "REGISTER" },
+                    onExit = { showExitDialog = true }
+                )
+            }
         }
 
         if (showExitDialog) {
@@ -8290,7 +8538,231 @@ class MainActivity : ComponentActivity() {
             )
         }
     }
+    @Composable
+    fun ExpiredMembershipScreen(
+        db: DatabaseHelper,
+        memberCode: String,
+        onBack: () -> Unit
+    ) {
+        val row = remember(memberCode) {
+            val cursor = db.readableDatabase.rawQuery(
+                """
+            SELECT
+                m.name,
+                COALESCE(m.photo_path, ''),
+                COALESCE(mp.name, 'Membership'),
+                COALESCE(ms.end_date, 'Unknown'),
+                COALESCE(ms.status, 'EXPIRED')
+            FROM members m
+            LEFT JOIN memberships ms
+                ON ms.id = (
+                    SELECT MAX(ms2.id)
+                    FROM memberships ms2
+                    WHERE ms2.member_id = m.id
+                )
+            LEFT JOIN membership_plans mp
+                ON mp.id = ms.plan_id
+            WHERE UPPER(m.member_code) = UPPER(?)
+            LIMIT 1
+            """.trimIndent(),
+                arrayOf(memberCode)
+            )
 
+            cursor.use {
+                if (it.moveToFirst()) {
+                    arrayOf(
+                        it.getString(0).orEmpty(),
+                        it.getString(1).orEmpty(),
+                        it.getString(2).orEmpty(),
+                        it.getString(3).orEmpty(),
+                        it.getString(4).orEmpty()
+                    )
+                } else {
+                    null
+                }
+            }
+        }
+
+        val name = row?.getOrNull(0).orEmpty()
+        val photoPath = row?.getOrNull(1).orEmpty()
+        val plan = row?.getOrNull(2).orEmpty()
+        val expiry = row?.getOrNull(3).orEmpty()
+
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF240B0B)),
+            contentAlignment = Alignment.Center
+        ) {
+            val wide = maxWidth >= 720.dp
+
+            Image(
+                painter = painterResource(
+                    id = R.drawable.checkin_bg
+                ),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f))
+            )
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 650.dp)
+                    .padding(if (wide) 28.dp else 18.dp),
+                shape = RoundedCornerShape(30.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFFFFF7F7)
+                ),
+                elevation = CardDefaults.cardElevation(
+                    defaultElevation = 12.dp
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(if (wide) 32.dp else 22.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(82.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFFFE4E6)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "!",
+                            fontSize = 56.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFFDC2626)
+                        )
+                    }
+
+                    Text(
+                        text = "MEMBERSHIP EXPIRED",
+                        fontSize = if (wide) 30.sp else 24.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFFB91C1C)
+                    )
+
+                    if (photoPath.isNotBlank()) {
+                        val bitmap = remember(photoPath) {
+                            BitmapFactory.decodeFile(photoPath)
+                        }
+
+                        if (bitmap != null) {
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = "Member photo",
+                                modifier = Modifier
+                                    .size(100.dp)
+                                    .clip(CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = name.ifBlank { "Member" },
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF111827)
+                    )
+
+                    Text(
+                        text = memberCode,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF475569)
+                    )
+
+                    HorizontalDivider()
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ExpiredInfoRow(
+                            label = "Membership Plan",
+                            value = plan
+                        )
+
+                        ExpiredInfoRow(
+                            label = "Expiry Date",
+                            value = expiry.ifBlank { "Unknown" }
+                        )
+
+                        ExpiredInfoRow(
+                            label = "Status",
+                            value = "EXPIRED",
+                            valueColor = Color(0xFFDC2626)
+                        )
+                    }
+
+                    Text(
+                        text = "Your membership has expired. " +
+                                "Please contact the trainer or reception " +
+                                "to renew your membership.",
+                        fontSize = 15.sp,
+                        color = Color(0xFF374151),
+                        textAlign =
+                            androidx.compose.ui.text.style.TextAlign.Center
+                    )
+
+                    Button(
+                        onClick = onBack,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFB91C1C)
+                        )
+                    ) {
+                        Text(
+                            text = "BACK TO HOME",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ExpiredInfoRow(
+        label: String,
+        value: String,
+        valueColor: Color = Color(0xFF111827)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = label,
+                fontSize = 14.sp,
+                color = Color(0xFF64748B)
+            )
+
+            Text(
+                text = value,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = valueColor
+            )
+        }
+    }
     @Composable
     fun CheckInTabletHomeScreen(
         gymName: String,
@@ -8761,7 +9233,7 @@ class MainActivity : ComponentActivity() {
 
 
     @Composable
-        fun CheckInMemberDetailsScreen(
+    fun CheckInMemberDetailsScreen(
         db: DatabaseHelper,
         memberCode: String,
         refresh: Int,
@@ -9231,130 +9703,156 @@ class MainActivity : ComponentActivity() {
             // =====================================================
 
             if (wide) {
-
-                Row(
-                    Modifier
-                        .fillMaxSize()
-                        .padding(18.dp),
-                    horizontalArrangement =
-                        Arrangement.spacedBy(18.dp),
-                    verticalAlignment =
-                        Alignment.CenterVertically
-                ) {
-
-                    // PROFILE SIDE
-
-                    Card(
+                    Row(
                         Modifier
-                            .weight(0.92f)
-                            .fillMaxHeight(),
-                        shape = RoundedCornerShape(34.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor =
-                                if (isTrial)
-                                    Color(0xFF991B1B)
-                                else
-                                    Color(0xFF0B1B31)
-                        ),
-                        elevation =
-                            CardDefaults.cardElevation(10.dp)
+                            .fillMaxSize()
+                            .padding(18.dp),
+                        horizontalArrangement =
+                            Arrangement.spacedBy(18.dp),
+                        verticalAlignment =
+                            Alignment.CenterVertically
                     ) {
 
-                        Column(
+                        // PROFILE SIDE
+
+                        Card(
                             Modifier
-                                .fillMaxSize()
-                                .padding(30.dp),
-                            horizontalAlignment =
-                                Alignment.CenterHorizontally,
-                            verticalArrangement =
-                                Arrangement.SpaceBetween
+                                .weight(0.92f)
+                                .fillMaxHeight(),
+                            shape = RoundedCornerShape(34.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor =
+                                    if (isTrial)
+                                        Color(0xFF991B1B)
+                                    else
+                                        Color(0xFF0B1B31)
+                            ),
+                            elevation =
+                                CardDefaults.cardElevation(10.dp)
                         ) {
 
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                verticalAlignment =
-                                    Alignment.CenterVertically
+                            Column(
+                                Modifier
+                                    .fillMaxSize()
+                                    .padding(30.dp),
+                                horizontalAlignment =
+                                    Alignment.CenterHorizontally,
+                                verticalArrangement =
+                                    Arrangement.SpaceBetween
                             ) {
 
-                                Surface(
-                                    shape =
-                                        RoundedCornerShape(13.dp),
-                                    color =
-                                        if (isTrial)
-                                            Color(0x33FFFFFF)
-                                        else
-                                            Color(0xFF172F52)
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    verticalAlignment =
+                                        Alignment.CenterVertically
                                 ) {
 
+                                    Surface(
+                                        shape =
+                                            RoundedCornerShape(13.dp),
+                                        color =
+                                            if (isTrial)
+                                                Color(0x33FFFFFF)
+                                            else
+                                                Color(0xFF172F52)
+                                    ) {
+
+                                        Text(
+                                            if (isTrial)
+                                                "TRIAL"
+                                            else
+                                                "MEMBER",
+                                            Modifier.padding(
+                                                horizontal = 12.dp,
+                                                vertical = 7.dp
+                                            ),
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight =
+                                                FontWeight.ExtraBold,
+                                            letterSpacing = 1.sp
+                                        )
+                                    }
+
+                                    Spacer(
+                                        Modifier.weight(1f)
+                                    )
+
                                     Text(
-                                        if (isTrial)
-                                            "TRIAL"
+                                        if (checkedIn)
+                                            "● CHECKED IN"
                                         else
-                                            "MEMBER",
-                                        Modifier.padding(
-                                            horizontal = 12.dp,
-                                            vertical = 7.dp
-                                        ),
-                                        color = Color.White,
+                                            "● READY",
+                                        color =
+                                            if (checkedIn)
+                                                Color(0xFF86EFAC)
+                                            else
+                                                Color(0xFF93C5FD),
                                         fontSize = 10.sp,
                                         fontWeight =
-                                            FontWeight.ExtraBold,
-                                        letterSpacing = 1.sp
+                                            FontWeight.ExtraBold
                                     )
                                 }
 
-                                Spacer(
-                                    Modifier.weight(1f)
-                                )
+                                Column(
+                                    horizontalAlignment =
+                                        Alignment.CenterHorizontally
+                                ) {
 
-                                Text(
-                                    if (checkedIn)
-                                        "● CHECKED IN"
-                                    else
-                                        "● READY",
-                                    color =
-                                        if (checkedIn)
-                                            Color(0xFF86EFAC)
-                                        else
-                                            Color(0xFF93C5FD),
-                                    fontSize = 10.sp,
-                                    fontWeight =
-                                        FontWeight.ExtraBold
-                                )
-                            }
+                                    if (photoPath.isNotBlank()) {
 
-                            Column(
-                                horizontalAlignment =
-                                    Alignment.CenterHorizontally
-                            ) {
+                                        val bitmap =
+                                            remember(photoPath) {
+                                                BitmapFactory
+                                                    .decodeFile(
+                                                        photoPath
+                                                    )
+                                            }
 
-                                if (photoPath.isNotBlank()) {
+                                        if (bitmap != null) {
 
-                                    val bitmap =
-                                        remember(photoPath) {
-                                            BitmapFactory
-                                                .decodeFile(
-                                                    photoPath
-                                                )
-                                        }
+                                            Image(
+                                                bitmap =
+                                                    bitmap
+                                                        .asImageBitmap(),
+                                                contentDescription =
+                                                    "Member photo",
+                                                modifier =
+                                                    Modifier
+                                                        .size(150.dp)
+                                                        .clip(
+                                                            CircleShape
+                                                        ),
+                                                contentScale =
+                                                    ContentScale.Crop
+                                            )
 
-                                    if (bitmap != null) {
+                                        } else {
 
-                                        Image(
-                                            bitmap =
-                                                bitmap
-                                                    .asImageBitmap(),
-                                            contentDescription =
-                                                "Member photo",
-                                            modifier =
+                                            Box(
                                                 Modifier
                                                     .size(150.dp)
                                                     .clip(
                                                         CircleShape
+                                                    )
+                                                    .background(
+                                                        Color(0xFF2563EB)
                                                     ),
-                                            contentScale =
-                                                ContentScale.Crop
-                                        )
+                                                contentAlignment =
+                                                    Alignment.Center
+                                            ) {
+
+                                                Text(
+                                                    name
+                                                        .take(1)
+                                                        .uppercase(),
+                                                    color = Color.White,
+                                                    fontSize = 58.sp,
+                                                    fontWeight =
+                                                        FontWeight.ExtraBold
+                                                )
+                                            }
+                                        }
 
                                     } else {
 
@@ -9365,7 +9863,10 @@ class MainActivity : ComponentActivity() {
                                                     CircleShape
                                                 )
                                                 .background(
-                                                    Color(0xFF2563EB)
+                                                    if (isTrial)
+                                                        Color(0xFFDC2626)
+                                                    else
+                                                        Color(0xFF2563EB)
                                                 ),
                                             contentAlignment =
                                                 Alignment.Center
@@ -9383,307 +9884,115 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
 
-                                } else {
+                                    Spacer(
+                                        Modifier.height(18.dp)
+                                    )
 
-                                    Box(
-                                        Modifier
-                                            .size(150.dp)
-                                            .clip(
-                                                CircleShape
-                                            )
-                                            .background(
-                                                if (isTrial)
-                                                    Color(0xFFDC2626)
-                                                else
-                                                    Color(0xFF2563EB)
-                                            ),
-                                        contentAlignment =
-                                            Alignment.Center
-                                    ) {
+                                    Text(
+                                        name,
+                                        color = Color.White,
+                                        fontSize = 30.sp,
+                                        fontWeight =
+                                            FontWeight.ExtraBold,
+                                        textAlign =
+                                            androidx.compose.ui.text.style.TextAlign.Center
+                                    )
 
-                                        Text(
-                                            name
-                                                .take(1)
-                                                .uppercase(),
-                                            color = Color.White,
-                                            fontSize = 58.sp,
-                                            fontWeight =
-                                                FontWeight.ExtraBold
-                                        )
-                                    }
+                                    Spacer(
+                                        Modifier.height(4.dp)
+                                    )
+
+                                    Text(
+                                        memberCode,
+                                        color =
+                                            if (isTrial)
+                                                Color(0xFFFECACA)
+                                            else
+                                                Color(0xFF93C5FD),
+                                        fontSize = 18.sp,
+                                        fontWeight =
+                                            FontWeight.ExtraBold,
+                                        letterSpacing = 2.sp
+                                    )
+
+                                    Spacer(
+                                        Modifier.height(10.dp)
+                                    )
+
+                                    Text(
+                                        plan,
+                                        color = Color(0xFFE2E8F0),
+                                        fontSize = 15.sp,
+                                        fontWeight =
+                                            FontWeight.Medium
+                                    )
                                 }
 
-                                Spacer(
-                                    Modifier.height(18.dp)
-                                )
-
                                 Text(
-                                    name,
-                                    color = Color.White,
-                                    fontSize = 30.sp,
+                                    if (isTrial)
+                                        "TRIAL MEMBERSHIP • SPECIAL CHECK-IN"
+                                    else
+                                        "WELCOME BACK • HAVE A GREAT SESSION",
+                                    color = Color(0xFFCBD5E1),
+                                    fontSize = 10.sp,
                                     fontWeight =
-                                        FontWeight.ExtraBold,
+                                        FontWeight.Bold,
+                                    letterSpacing = 0.8.sp,
                                     textAlign =
                                         androidx.compose.ui.text.style.TextAlign.Center
                                 )
-
-                                Spacer(
-                                    Modifier.height(4.dp)
-                                )
-
-                                Text(
-                                    memberCode,
-                                    color =
-                                        if (isTrial)
-                                            Color(0xFFFECACA)
-                                        else
-                                            Color(0xFF93C5FD),
-                                    fontSize = 18.sp,
-                                    fontWeight =
-                                        FontWeight.ExtraBold,
-                                    letterSpacing = 2.sp
-                                )
-
-                                Spacer(
-                                    Modifier.height(10.dp)
-                                )
-
-                                Text(
-                                    plan,
-                                    color = Color(0xFFE2E8F0),
-                                    fontSize = 15.sp,
-                                    fontWeight =
-                                        FontWeight.Medium
-                                )
                             }
-
-                            Text(
-                                if (isTrial)
-                                    "TRIAL MEMBERSHIP • SPECIAL CHECK-IN"
-                                else
-                                    "WELCOME BACK • HAVE A GREAT SESSION",
-                                color = Color(0xFFCBD5E1),
-                                fontSize = 10.sp,
-                                fontWeight =
-                                    FontWeight.Bold,
-                                letterSpacing = 0.8.sp,
-                                textAlign =
-                                    androidx.compose.ui.text.style.TextAlign.Center
-                            )
                         }
-                    }
 
-                    // DETAILS + ACTIONS SIDE
+                        // DETAILS + ACTIONS SIDE
 
-                    Card(
-                        Modifier
-                            .weight(1.08f)
-                            .fillMaxHeight(),
-                        shape = RoundedCornerShape(34.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor =
-                                Color(0xFFF8FAFC)
-                        ),
-                        elevation =
-                            CardDefaults.cardElevation(10.dp)
-                    ) {
-
-                        Column(
+                        Card(
                             Modifier
-                                .fillMaxSize()
-                                .padding(24.dp)
+                                .weight(1.08f)
+                                .fillMaxHeight(),
+                            shape = RoundedCornerShape(34.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor =
+                                    Color(0xFFF8FAFC)
+                            ),
+                            elevation =
+                                CardDefaults.cardElevation(10.dp)
                         ) {
 
-                            Text(
-                                if (isTrial)
-                                    "TRIAL ACCESS"
-                                else
-                                    "MEMBERSHIP STATUS",
-                                color = Color(0xFF64748B),
-                                fontSize = 10.sp,
-                                fontWeight =
-                                    FontWeight.ExtraBold,
-                                letterSpacing = 1.5.sp
-                            )
-
-                            Text(
-                                if (isTrial)
-                                    "Welcome to your first workout"
-                                else
-                                    "You're all set to train",
-                                color = Color(0xFF0F172A),
-                                fontSize = 25.sp,
-                                fontWeight =
-                                    FontWeight.ExtraBold
-                            )
-
-                            Spacer(
-                                Modifier.height(14.dp)
-                            )
-
-                            if (!isTrial) {
-
-                                Row(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement =
-                                        Arrangement.spacedBy(10.dp)
-                                ) {
-
-                                    InfoTile(
-                                        "EXPIRY",
-                                        expiry.ifBlank {
-                                            "—"
-                                        },
-                                        Color(0xFF2563EB),
-                                        Modifier.weight(1f)
-                                    )
-
-                                    InfoTile(
-                                        "DAYS LEFT",
-                                        remainingDays.toString(),
-                                        if (
-                                            remainingDays <= 10
-                                        )
-                                            Color(0xFFF59E0B)
-                                        else
-                                            Color(0xFF16A34A),
-                                        Modifier.weight(1f)
-                                    )
-
-                                    InfoTile(
-                                        "BALANCE",
-                                        "₹${
-                                            String.format(
-                                                java.util.Locale.US,
-                                                "%.2f",
-                                                balance
-                                            )
-                                        }",
-                                        if (balance > 0)
-                                            Color(0xFFDC2626)
-                                        else
-                                            Color(0xFF16A34A),
-                                        Modifier.weight(1f)
-                                    )
-                                }
-
-                            } else {
-
-                                Card(
-                                    Modifier.fillMaxWidth(),
-                                    shape =
-                                        RoundedCornerShape(20.dp),
-                                    colors =
-                                        CardDefaults.cardColors(
-                                            containerColor =
-                                                Color(0xFFFFE4E6)
-                                        )
-                                ) {
-
-                                    Column(
-                                        Modifier.padding(17.dp)
-                                    ) {
-
-                                        Text(
-                                            "TRIAL MEMBERSHIP",
-                                            color =
-                                                Color(0xFFB91C1C),
-                                            fontSize = 11.sp,
-                                            fontWeight =
-                                                FontWeight.ExtraBold
-                                        )
-
-                                        Spacer(
-                                            Modifier.height(4.dp)
-                                        )
-
-                                        Text(
-                                            "Your trial access is active. Enjoy your workout!",
-                                            color =
-                                                Color(0xFF7F1D1D),
-                                            fontSize = 13.sp,
-                                            fontWeight =
-                                                FontWeight.SemiBold
-                                        )
-                                    }
-                                }
-                            }
-
-                            Spacer(
-                                Modifier.height(12.dp)
-                            )
-
-                            Card(
+                            Column(
                                 Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                shape =
-                                    RoundedCornerShape(22.dp),
-                                colors =
-                                    CardDefaults.cardColors(
-                                        containerColor =
-                                            Color(0xFFF1F5F9)
-                                    )
+                                    .fillMaxSize()
+                                    .padding(24.dp)
                             ) {
 
-                                Column(
-                                    Modifier
-                                        .fillMaxSize()
-                                        .padding(18.dp),
-                                    verticalArrangement =
-                                        Arrangement.SpaceBetween
-                                ) {
+                                Text(
+                                    if (isTrial)
+                                        "TRIAL ACCESS"
+                                    else
+                                        "MEMBERSHIP STATUS",
+                                    color = Color(0xFF64748B),
+                                    fontSize = 10.sp,
+                                    fontWeight =
+                                        FontWeight.ExtraBold,
+                                    letterSpacing = 1.5.sp
+                                )
 
-                                    Column {
+                                Text(
+                                    if (isTrial)
+                                        "Welcome to your first workout"
+                                    else
+                                        "You're all set to train",
+                                    color = Color(0xFF0F172A),
+                                    fontSize = 25.sp,
+                                    fontWeight =
+                                        FontWeight.ExtraBold
+                                )
 
-                                        Text(
-                                            "ATTENDANCE",
-                                            color =
-                                                Color(0xFF64748B),
-                                            fontSize = 10.sp,
-                                            fontWeight =
-                                                FontWeight.ExtraBold,
-                                            letterSpacing = 1.3.sp
-                                        )
+                                Spacer(
+                                    Modifier.height(14.dp)
+                                )
 
-                                        Spacer(
-                                            Modifier.height(6.dp)
-                                        )
-
-                                        Text(
-                                            if (checkedIn)
-                                                "Member is currently inside the gym"
-                                            else
-                                                "Ready to record today's visit",
-                                            color =
-                                                Color(0xFF334155),
-                                            fontSize = 14.sp,
-                                            fontWeight =
-                                                FontWeight.SemiBold
-                                        )
-
-                                        Spacer(
-                                            Modifier.height(10.dp)
-                                        )
-
-                                        Text(
-                                            CheckInModeConfig
-                                                .successMessage()
-                                                .ifBlank {
-                                                    "CHECK-IN DONE! HAVE A GREAT WORKOUT."
-                                                },
-                                            Modifier.padding(
-                                                horizontal = 18.dp,
-                                                vertical = 12.dp
-                                            ),
-                                            color = Color.Black,
-                                            fontSize = 25.sp,
-                                            fontWeight =
-                                                FontWeight.ExtraBold,
-                                            textAlign =
-                                                androidx.compose.ui.text.style.TextAlign.Center
-                                        )
-                                    }
+                                if (!isTrial) {
 
                                     Row(
                                         Modifier.fillMaxWidth(),
@@ -9691,69 +10000,231 @@ class MainActivity : ComponentActivity() {
                                             Arrangement.spacedBy(10.dp)
                                     ) {
 
-                                        Button(
-                                            onClick = {
-                                                try {
-
-                                                    val ok =
-                                                        db.checkIn(
-                                                            memberCode
-                                                        )
-
-                                                    if (ok) {
-                                                        checkInDone = true
-                                                        onChanged()
-                                                    }
-
-                                                } catch (_: Exception) {
-                                                }
+                                        InfoTile(
+                                            "EXPIRY",
+                                            expiry.ifBlank {
+                                                "—"
                                             },
-                                            enabled = !checkedIn,
-                                            modifier =
-                                                Modifier
-                                                    .weight(1f)
-                                                    .height(54.dp),
-                                            shape =
-                                                RoundedCornerShape(
-                                                    18.dp
-                                                ),
-                                            colors =
-                                                ButtonDefaults
-                                                    .buttonColors(
-                                                        containerColor =
-                                                            Color(0xFF16A34A)
-                                                    )
+                                            Color(0xFF2563EB),
+                                            Modifier.weight(1f)
+                                        )
+
+                                        InfoTile(
+                                            "DAYS LEFT",
+                                            remainingDays.toString(),
+                                            if (
+                                                remainingDays <= 10
+                                            )
+                                                Color(0xFFF59E0B)
+                                            else
+                                                Color(0xFF16A34A),
+                                            Modifier.weight(1f)
+                                        )
+
+                                        InfoTile(
+                                            "BALANCE",
+                                            "₹${
+                                                String.format(
+                                                    java.util.Locale.US,
+                                                    "%.2f",
+                                                    balance
+                                                )
+                                            }",
+                                            if (balance > 0)
+                                                Color(0xFFDC2626)
+                                            else
+                                                Color(0xFF16A34A),
+                                            Modifier.weight(1f)
+                                        )
+                                    }
+
+                                } else {
+
+                                    Card(
+                                        Modifier.fillMaxWidth(),
+                                        shape =
+                                            RoundedCornerShape(20.dp),
+                                        colors =
+                                            CardDefaults.cardColors(
+                                                containerColor =
+                                                    Color(0xFFFFE4E6)
+                                            )
+                                    ) {
+
+                                        Column(
+                                            Modifier.padding(17.dp)
                                         ) {
 
                                             Text(
-                                                "✓  CLOCK IN",
-                                                fontSize = 16.sp,
+                                                "TRIAL MEMBERSHIP",
+                                                color =
+                                                    Color(0xFFB91C1C),
+                                                fontSize = 11.sp,
                                                 fontWeight =
                                                     FontWeight.ExtraBold
                                             )
+
+                                            Spacer(
+                                                Modifier.height(4.dp)
+                                            )
+
+                                            Text(
+                                                "Your trial access is active. Enjoy your workout!",
+                                                color =
+                                                    Color(0xFF7F1D1D),
+                                                fontSize = 13.sp,
+                                                fontWeight =
+                                                    FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(
+                                    Modifier.height(12.dp)
+                                )
+
+                                Card(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f),
+                                    shape =
+                                        RoundedCornerShape(22.dp),
+                                    colors =
+                                        CardDefaults.cardColors(
+                                            containerColor =
+                                                Color(0xFFF1F5F9)
+                                        )
+                                ) {
+
+                                    Column(
+                                        Modifier
+                                            .fillMaxSize()
+                                            .padding(18.dp),
+                                        verticalArrangement =
+                                            Arrangement.SpaceBetween
+                                    ) {
+
+                                        Column {
+
+                                            Text(
+                                                "ATTENDANCE",
+                                                color =
+                                                    Color(0xFF64748B),
+                                                fontSize = 10.sp,
+                                                fontWeight =
+                                                    FontWeight.ExtraBold,
+                                                letterSpacing = 1.3.sp
+                                            )
+
+                                            Spacer(
+                                                Modifier.height(6.dp)
+                                            )
+
+                                            Text(
+                                                if (checkedIn)
+                                                    "Member is currently inside the gym"
+                                                else
+                                                    "Ready to record today's visit",
+                                                color =
+                                                    Color(0xFF334155),
+                                                fontSize = 14.sp,
+                                                fontWeight =
+                                                    FontWeight.SemiBold
+                                            )
+
+                                            Spacer(
+                                                Modifier.height(10.dp)
+                                            )
+
+                                            Text(
+                                                CheckInModeConfig
+                                                    .successMessage()
+                                                    .ifBlank {
+                                                        "CHECK-IN DONE! HAVE A GREAT WORKOUT."
+                                                    },
+                                                Modifier.padding(
+                                                    horizontal = 18.dp,
+                                                    vertical = 12.dp
+                                                ),
+                                                color = Color.Black,
+                                                fontSize = 25.sp,
+                                                fontWeight =
+                                                    FontWeight.ExtraBold,
+                                                textAlign =
+                                                    androidx.compose.ui.text.style.TextAlign.Center
+                                            )
                                         }
 
-                                        // =================================================
-                                        // CORRECTED CLOCK OUT
-                                        // =================================================
+                                        Row(
+                                            Modifier.fillMaxWidth(),
+                                            horizontalArrangement =
+                                                Arrangement.spacedBy(10.dp)
+                                        ) {
 
-                                        OutlinedButton(
-                                            onClick = {
+                                            Button(
+                                                onClick = {
+                                                    try {
 
-                                                try {
+                                                        val ok =
+                                                            db.checkIn(
+                                                                memberCode
+                                                            )
 
-                                                    val ok =
-                                                        db.checkOut(
-                                                            memberCode
+                                                        if (ok) {
+                                                            checkInDone = true
+                                                            onChanged()
+                                                        }
+
+                                                    } catch (_: Exception) {
+                                                    }
+                                                },
+                                                enabled = !checkedIn,
+                                                modifier =
+                                                    Modifier
+                                                        .weight(1f)
+                                                        .height(54.dp),
+                                                shape =
+                                                    RoundedCornerShape(
+                                                        18.dp
+                                                    ),
+                                                colors =
+                                                    ButtonDefaults
+                                                        .buttonColors(
+                                                            containerColor =
+                                                                Color(0xFF16A34A)
                                                         )
+                                            ) {
 
-                                                    if (ok) {
+                                                Text(
+                                                    "✓  CLOCK IN",
+                                                    fontSize = 16.sp,
+                                                    fontWeight =
+                                                        FontWeight.ExtraBold
+                                                )
+                                            }
 
-                                                        // Read the workout duration
-                                                        // that was saved by DatabaseHelper.
-                                                        val durationCursor =
-                                                            db.readableDatabase.rawQuery(
-                                                                """
+                                            // =================================================
+                                            // CORRECTED CLOCK OUT
+                                            // =================================================
+
+                                            OutlinedButton(
+                                                onClick = {
+
+                                                    try {
+
+                                                        val ok =
+                                                            db.checkOut(
+                                                                memberCode
+                                                            )
+
+                                                        if (ok) {
+
+                                                            // Read the workout duration
+                                                            // that was saved by DatabaseHelper.
+                                                            val durationCursor =
+                                                                db.readableDatabase.rawQuery(
+                                                                    """
                                                             SELECT COALESCE(workout_hours,0)
                                                             FROM attendance
                                                             WHERE member_id = (
@@ -9765,70 +10236,70 @@ class MainActivity : ComponentActivity() {
                                                             ORDER BY id DESC
                                                             LIMIT 1
                                                             """.trimIndent(),
-                                                                arrayOf(memberCode)
-                                                            )
+                                                                    arrayOf(memberCode)
+                                                                )
 
-                                                        durationCursor.use {
+                                                            durationCursor.use {
 
-                                                            if (
-                                                                it.moveToFirst()
-                                                            ) {
-                                                                workedHours =
-                                                                    it.getDouble(0)
+                                                                if (
+                                                                    it.moveToFirst()
+                                                                ) {
+                                                                    workedHours =
+                                                                        it.getDouble(0)
+                                                                }
                                                             }
+
+                                                            checkOutDone = true
+                                                            onChanged()
                                                         }
 
-                                                        checkOutDone = true
-                                                        onChanged()
+                                                    } catch (_: Exception) {
                                                     }
+                                                },
+                                                enabled = checkedIn,
+                                                modifier =
+                                                    Modifier
+                                                        .weight(1f)
+                                                        .height(54.dp),
+                                                shape =
+                                                    RoundedCornerShape(
+                                                        18.dp
+                                                    )
+                                            ) {
 
-                                                } catch (_: Exception) {
-                                                }
-                                            },
-                                            enabled = checkedIn,
+                                                Text(
+                                                    "CLOCK OUT",
+                                                    fontSize = 15.sp,
+                                                    fontWeight =
+                                                        FontWeight.ExtraBold
+                                                )
+                                            }
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = onBack,
                                             modifier =
                                                 Modifier
-                                                    .weight(1f)
-                                                    .height(54.dp),
+                                                    .fillMaxWidth()
+                                                    .height(48.dp),
                                             shape =
-                                                RoundedCornerShape(
-                                                    18.dp
-                                                )
+                                                RoundedCornerShape(15.dp)
                                         ) {
 
                                             Text(
-                                                "CLOCK OUT",
-                                                fontSize = 15.sp,
+                                                "← BACK TO CHECK-IN",
+                                                fontSize = 12.sp,
                                                 fontWeight =
-                                                    FontWeight.ExtraBold
+                                                    FontWeight.Bold
                                             )
                                         }
-                                    }
-
-                                    OutlinedButton(
-                                        onClick = onBack,
-                                        modifier =
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .height(48.dp),
-                                        shape =
-                                            RoundedCornerShape(15.dp)
-                                    ) {
-
-                                        Text(
-                                            "← BACK TO CHECK-IN",
-                                            fontSize = 12.sp,
-                                            fontWeight =
-                                                FontWeight.Bold
-                                        )
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-            } else {
+        }else {
 
                 // =====================================================
                 // PORTRAIT UI
@@ -10671,43 +11142,93 @@ fun ProfileSectionCard(
     val sectionColor = when (key) {
         "MEMBERSHIP" -> Color(0xFF7C3AED)
         "PERSONAL" -> Color(0xFF0284C7)
+        "DOCUMENTS" -> Color(0xFF0F9D8A)
+        "HISTORY" -> Color(0xFFEA580C)
         else -> Color(0xFF0F9D8A)
     }
+
     Card(
         modifier = Modifier.width(220.dp),
         onClick = onSelected,
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (selected) sectionColor else MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (selected) 5.dp else 2.dp)
-    ) {
-        Row(Modifier
-            .fillMaxWidth()
-            .padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier
-                .size(42.dp)
-                .clip(RoundedCornerShape(13.dp))
-                .background(
-                    if (selected) Color.White.copy(alpha = .18f) else sectionColor.copy(
-                        alpha = .12f
-                    )
-                ), contentAlignment = Alignment.Center) {
-                Text(when (key) { "MEMBERSHIP" -> "▣"; "PERSONAL" -> "●"; else -> "▤" }, fontSize = 21.sp, color = if (selected) Color.White else sectionColor, fontWeight = FontWeight.ExtraBold)
+            containerColor = if (selected) {
+                sectionColor
+            } else {
+                MaterialTheme.colorScheme.surface
             }
+        ),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = if (selected) 5.dp else 2.dp
+        )
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(
+                        if (selected) {
+                            Color.White.copy(alpha = 0.18f)
+                        } else {
+                            sectionColor.copy(alpha = 0.12f)
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = when (key) {
+                        "MEMBERSHIP" -> "▣"
+                        "PERSONAL" -> "●"
+                        "DOCUMENTS" -> "▤"
+                        "HISTORY" -> "↻"
+                        else -> "▤"
+                    },
+                    fontSize = 21.sp,
+                    color = if (selected) Color.White else sectionColor,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+
             Spacer(Modifier.width(11.dp))
+
             Column(Modifier.weight(1f)) {
-                Text(title, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface)
+                Text(
+                    text = title,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 14.sp,
+                    color = if (selected) {
+                        Color.White
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    }
+                )
+
                 Spacer(Modifier.height(2.dp))
-                Text(subtitle, fontSize = 10.sp, color = if (selected) Color.White.copy(alpha = .78f) else MaterialTheme.colorScheme.onSurfaceVariant)
+
+                Text(
+                    text = subtitle,
+                    fontSize = 10.sp,
+                    color = if (selected) {
+                        Color.White.copy(alpha = 0.78f)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
             }
         }
     }
 }
-
 @Composable
 fun ProfileSelectedContent(
     section: String,
+    db: DatabaseHelper,
+    memberId: Long,
     profileBitmap: Bitmap?,
     name: String,
     memberCode: String,
@@ -10748,8 +11269,11 @@ fun ProfileSelectedContent(
     val sectionColor = when (section) {
         "MEMBERSHIP" -> Color(0xFF7C3AED)
         "PERSONAL" -> Color(0xFF0284C7)
+        "DOCUMENTS" -> Color(0xFF0F9D8A)
+        "HISTORY" -> Color(0xFFEA580C)
         else -> Color(0xFF0F9D8A)
     }
+
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), elevation = CardDefaults.cardElevation(4.dp)) {
         Column(Modifier.padding(20.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -10757,12 +11281,12 @@ fun ProfileSelectedContent(
                     .size(46.dp)
                     .clip(RoundedCornerShape(14.dp))
                     .background(sectionColor), contentAlignment = Alignment.Center) {
-                    Text(when(section){"MEMBERSHIP"->"▣";"PERSONAL"->"●";else->"▤"}, color=Color.White, fontSize=22.sp, fontWeight=FontWeight.ExtraBold)
+                    Text(when(section){"MEMBERSHIP"->"▣";"PERSONAL"->"●";"HISTORY" -> "↻";else->"▤"}, color=Color.White, fontSize=22.sp, fontWeight=FontWeight.ExtraBold)
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(when(section){"MEMBERSHIP"->"Membership Details";"PERSONAL"->"Personal Information";else->"Government Documents"}, fontSize=22.sp, fontWeight=FontWeight.ExtraBold)
-                    Text(when(section){"MEMBERSHIP"->"Plan, dates and payment summary";"PERSONAL"->"Contact and member details";else->"Upload and manage member documents"}, fontSize=11.sp, color=MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(when(section){"MEMBERSHIP"->"Membership Details";"PERSONAL"->"Personal Information";"HISTORY" -> "Membership History";else->"Government Documents"}, fontSize=22.sp, fontWeight=FontWeight.ExtraBold)
+                    Text(when(section){"MEMBERSHIP"->"Plan, dates and payment summary";"PERSONAL"->"Contact and member details";"HISTORY" -> "All past and current plans and gym visits";else->"Upload and manage member documents"}, fontSize=11.sp, color=MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (section == "PERSONAL") OutlinedButton(onClick=onEdit) { Text("EDIT") }
                 if (section == "DOCUMENTS") Button(onClick=onAddDocument) { Text("+ ADD DOCUMENT") }
@@ -10816,6 +11340,122 @@ fun ProfileSelectedContent(
                     Text("EMERGENCY CONTACT", fontSize=13.sp, fontWeight=FontWeight.ExtraBold, color=Color(0xFFDC2626))
                     ProfileInfoRow("Name", emergencyContact); ProfileInfoRow("Phone", emergencyPhone)
                     if(notes.isNotBlank()){ Spacer(Modifier.height(10.dp)); Text("NOTES", fontSize=13.sp, fontWeight=FontWeight.ExtraBold, color=Color(0xFFF59E0B)); Text(notes, fontSize=14.sp) }
+                }
+                "HISTORY" -> {
+                    val history = remember(memberId) {
+                        val rows = mutableListOf<Array<String>>()
+
+                        val cursor = db.readableDatabase.rawQuery(
+                            """
+            SELECT
+                COALESCE(p.name, 'Membership'),
+                ms.start_date,
+                ms.end_date,
+                ms.status,
+                ms.is_trial,
+                (
+                    SELECT COUNT(DISTINCT date(a.check_in))
+                    FROM attendance a
+                    WHERE a.member_id = ms.member_id
+                      AND date(a.check_in) >= date(ms.start_date)
+                      AND date(a.check_in) <= date(ms.end_date)
+                )
+            FROM memberships ms
+            LEFT JOIN membership_plans p ON p.id = ms.plan_id
+            WHERE ms.member_id = ?
+            ORDER BY ms.id DESC
+            """.trimIndent(),
+                            arrayOf(memberId.toString())
+                        )
+
+                        cursor.use {
+                            while (it.moveToNext()) {
+                                rows.add(
+                                    arrayOf(
+                                        it.getString(0) ?: "Membership",
+                                        it.getString(1) ?: "-",
+                                        it.getString(2) ?: "-",
+                                        it.getString(3) ?: "Unknown",
+                                        if (it.getInt(4) == 1) "TRIAL" else "REGULAR",
+                                        it.getString(5) ?: "0"
+                                    )
+                                )
+                            }
+                        }
+                        rows
+                    }
+
+                    if (history.isEmpty()) {
+                        Text(
+                            "No membership history available.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        history.forEachIndexed { index, item ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 5.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = sectionColor.copy(alpha = 0.07f)
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                item[0],
+                                                fontSize = 17.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                            Text(
+                                                item[4],
+                                                fontSize = 11.sp,
+                                                color = sectionColor,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+
+                                        Text(
+                                            item[3].uppercase(),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = when {
+                                                item[3].equals("Active", true) ->
+                                                    Color(0xFF16A34A)
+
+                                                item[3].equals("Expired", true) ->
+                                                    Color(0xFFDC2626)
+
+                                                else -> MaterialTheme.colorScheme
+                                                    .onSurfaceVariant
+                                            }
+                                        )
+                                    }
+
+                                    HorizontalDivider()
+
+                                    ProfileInfoRow("Start Date", item[1])
+                                    ProfileInfoRow("End Date", item[2])
+                                    ProfileInfoRow("Gym Login Days", item[5])
+
+                                    Text(
+                                        if (index == 0) "Latest plan" else "Previous plan",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 "DOCUMENTS" -> {
                     if (documents.isEmpty()) Text("No government documents uploaded.", color=MaterialTheme.colorScheme.onSurfaceVariant)
@@ -14057,6 +14697,5 @@ fun SwipeLeftMemberCard(
         content()
     }
 }
-
 
 
